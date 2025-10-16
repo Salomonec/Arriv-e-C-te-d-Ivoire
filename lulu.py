@@ -98,7 +98,7 @@ def style_excel_like(fig, *, title, base_start, ylabel, y_max_hint=None):
     return fig
 
 # ========= FICHIERS =========
-DATA_FILE = Path(r"C:\Users\s.soro\Touton SA Dropbox\STATISTIQUES\ResearchFiles\Fiches_Pays.xlsm")
+DATA_FILE = Path(r"https://www.dropbox.com/scl/fi/wyzhzkzx5ddxug3qgdvwt/Fiches_Pays.xlsm?rlkey=vqauw3m1v3c1tc8r0blx7rng3&st=cigqcyle&dl=0")
 SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
 SHEET_WEEKLY = "CIV_Arrivals_BDD"
 SHEET_BOTA   = "CIV_Bota_Arrivals_Treatments"  # Prévisions hebdo
