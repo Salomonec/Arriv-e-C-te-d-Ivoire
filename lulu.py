@@ -158,7 +158,7 @@ def add_value_labels(fig, unit=" t", extra_headroom=0.18):
 
 # ========= FICHIERS =========
 # Par défaut un chemin local, mais on peut surcharger via st.secrets (DATA_URL / DATA_PATH)
-DEFAULT_DATA = r"C:\Users\s.soro\Touton SA Dropbox\STATISTIQUES\ResearchFiles\Fiches_Pays.xlsm"
+DEFAULT_DATA = r"https://www.dropbox.com/scl/fi/wyzhzkzx5ddxug3qgdvwt/Fiches_Pays.xlsm?rlkey=vqauw3m1v3c1tc8r0blx7rng3&st=cigqcyle&dl=0"
 DATA_FILE = _resolve_data_source(DEFAULT_DATA)
 
 SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
