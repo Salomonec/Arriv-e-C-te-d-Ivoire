@@ -1,47 +1,24 @@
-# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions BOTA
+# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions STAT (25/26)
 # -----------------------------------------------------------------------------
-# 1) Cumul campagne (hebdo/mensuel) + superposition multi-années + BOTA
-# 2) Comparaison Main/Mid (hebdo officiel) — HISTOGRAMMES + slider de semaines + LTA
-# 3) Cumuls hebdomadaires – Multi-années + LTA (officiel) + BOTA
-# 4) Répartitions (camemberts) : ports, jours de la semaine (moyenne hebdo)
-# 5) Comparaison journalière + export CSV
-# Style : fond blanc, grille grise, cadre noir ; titres/axes en gras
+# 1) Cumul campagne (hebdo/mensuel) + superposition multi-années
+# 2) Comparaison Main/Mid (hebdo officiel) — HISTOGRAMMES + slider + LTA + STAT (25/26)
+# 3) Cumuls hebdomadaires – Multi-années + LTA (officiel) + STAT (25/26)
+# 4) Comparaison journalière (avant export) + Répartitions (camemberts)
+# 5) Export CSV (journalier filtré) — une seule option d’export
 # -----------------------------------------------------------------------------
 
-from __future__ import annotations
+import io
 import re
 from pathlib import Path
 from typing import Optional, Tuple, List
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 st.set_page_config(page_title="CIV – Port Arrivals (Cacao)", layout="wide")
-
-# ========= UTIL: Dropbox direct link / secrets =========
-def _dropbox_to_direct(url: str) -> str:
-    if not isinstance(url, str) or not url:
-        return url
-    if "dropbox.com" in url and "dl=1" not in url:
-        if url.endswith("?dl=0"):
-            url = url[:-5]
-        url += ("&dl=1" if "?" in url else "?dl=1")
-    return url
-
-def _resolve_data_source(default_path: str) -> str:
-    # Essaye st.secrets["DATA_URL"] puis st.secrets["DATA_PATH"] sinon défaut
-    try:
-        from streamlit.runtime.secrets import secrets
-        data_url = secrets.get("DATA_URL", "").strip()
-        if data_url:
-            return _dropbox_to_direct(data_url)
-        data_path = secrets.get("DATA_PATH", "").strip()
-        if data_path:
-            return data_path
-    except Exception:
-        pass
-    return default_path
 
 # ========= PALETTE =========
 def build_palette_long():
@@ -58,33 +35,24 @@ def build_palette_long():
 
 # ========= STYLES =========
 BOLD_FONT = "Arial Black, Arial, sans-serif"
-WEEK_MS = 7 * 24 * 60 * 60 * 1000  # 7 jours en ms
+WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
 def _next_sunday(d: pd.Timestamp) -> pd.Timestamp:
     d = pd.Timestamp(d).normalize()
-    off = (6 - d.weekday()) % 7  # Mon=0..Sun=6
+    off = (6 - d.weekday()) % 7
     return d + pd.Timedelta(days=off)
 
 def weekly_xaxis_on_sundays(anchor: pd.Timestamp) -> dict:
     tick0 = _next_sunday(anchor)
     return dict(title="Date", tickformat="%d/%m/%Y", tickmode="linear", tick0=tick0, dtick=WEEK_MS)
 
-def style_fig(fig, *, title=None, xaxis=None, yaxis=None, bg="transparent", legend_right=False):
+def style_fig(fig, *, title=None, xaxis=None, yaxis=None, bg="transparent"):
     paper = "rgba(0,0,0,0)" if bg=="transparent" else "white"
-    legend_layout = dict(
-        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-        font=dict(family=BOLD_FONT, size=11), bgcolor="rgba(255,255,255,0)"
-    )
-    if legend_right:
-        legend_layout = dict(
-            orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
-            font=dict(family=BOLD_FONT, size=11), bgcolor="rgba(255,255,255,0)"
-        )
-
     fig.update_layout(
         paper_bgcolor=paper, plot_bgcolor=paper,
         font=dict(family=BOLD_FONT, size=12),
-        legend=legend_layout
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0,
+                    font=dict(family=BOLD_FONT, size=11), bgcolor="rgba(255,255,255,0)")
     )
     if title is not None:
         fig.update_layout(title=f"<b>{title}</b>", title_font=dict(family=BOLD_FONT, size=16))
@@ -103,17 +71,14 @@ def style_fig(fig, *, title=None, xaxis=None, yaxis=None, bg="transparent", lege
     return fig
 
 def style_excel_like(fig, *, title, base_start, ylabel, y_max_hint=None):
-    """Fond blanc, grille, cadre; ticks les dimanches. Autorange Y si y_max_hint<=0."""
     xax = weekly_xaxis_on_sundays(base_start)
     xax["tickangle"] = 45
-
     fig.update_layout(
         paper_bgcolor="white", plot_bgcolor="white",
         title=f"<b>{title}</b>", title_font=dict(family=BOLD_FONT, size=16),
         font=dict(family=BOLD_FONT, size=12),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                    bgcolor="rgba(255,255,255,0)",
-                    font=dict(family=BOLD_FONT, size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0,
+                    bgcolor="rgba(255,255,255,0)", font=dict(family=BOLD_FONT, size=11)),
         margin=dict(l=70, r=40, t=70, b=70),
     )
     fig.update_xaxes(**xax, showgrid=True, gridcolor="#cccccc")
@@ -128,15 +93,11 @@ def style_excel_like(fig, *, title, base_start, ylabel, y_max_hint=None):
                          tickformat=",.0f", showgrid=True, gridcolor="#cccccc",
                          tickfont=dict(family=BOLD_FONT, size=11),
                          title_font=dict(family=BOLD_FONT, size=12))
-
-    # cadre noir
     fig.add_shape(type="rect", xref="paper", yref="paper", x0=0, y0=0, x1=1, y1=1,
                   line=dict(color="black", width=1))
     return fig
 
-# ========= Labels en gras sur barres =========
 def add_value_labels(fig, unit=" t", extra_headroom=0.18):
-    """Affiche les valeurs en gras/noir sur les barres et ajoute de l'air en Y."""
     fig.update_traces(
         texttemplate="<b>%{y:,.0f}" + unit + "</b>",
         textposition="outside",
@@ -155,15 +116,6 @@ def add_value_labels(fig, unit=" t", extra_headroom=0.18):
     if ymax > 0:
         fig.update_yaxes(range=[0, ymax * (1.0 + extra_headroom)])
     return fig
-
-# ========= FICHIERS =========
-# Par défaut un chemin local, mais on peut surcharger via st.secrets (DATA_URL / DATA_PATH)
-DEFAULT_DATA = r"https://www.dropbox.com/scl/fi/wyzhzkzx5ddxug3qgdvwt/Fiches_Pays.xlsm?rlkey=vqauw3m1v3c1tc8r0blx7rng3&st=cigqcyle&dl=0"
-DATA_FILE = _resolve_data_source(DEFAULT_DATA)
-
-SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
-SHEET_WEEKLY = "CIV_Arrivals_BDD"
-SHEET_BOTA   = "CIV_Bota_Arrivals_Treatments"  # Prévisions hebdo
 
 # ========= HELPERS =========
 def _to_float(x):
@@ -200,11 +152,46 @@ def _safe_index(lst, value):
     except ValueError:
         return len(lst) - 1 if lst else 0
 
+def _open_excel_dropbox(path_like: str) -> Optional[io.BytesIO]:
+    if not isinstance(path_like, str):
+        return None
+    url = path_like
+    if "dropbox.com" in url:
+        if "?dl=0" in url: url = url.replace("?dl=0", "?dl=1")
+        elif "?dl=1" not in url and "?raw=1" not in url:
+            glue = "&" if "?" in url else "?"
+            url = f"{url}{glue}dl=1"
+        try:
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            return io.BytesIO(r.content)
+        except Exception as e:
+            st.error(f"Échec du chargement Dropbox: {e}")
+            return None
+    return None
+
+def _excel_col_to_idx(col_letters: str) -> int:
+    col_letters = col_letters.strip().upper()
+    n = 0
+    for ch in col_letters:
+        n = n * 26 + (ord(ch) - ord('A') + 1)
+    return n - 1
+
+# ========= FICHIERS =========
+DATA_FILE = r"https://www.dropbox.com/scl/fi/wyzhzkzx5ddxug3qgdvwt/Fiches_Pays.xlsm?rlkey=vqauw3m1v3c1tc8r0blx7rng3&dl=0"
+SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
+SHEET_WEEKLY = "CIV_Arrivals_BDD"
+SHEET_STAT   = "CIV_Bota_Arrivals_Treatments"
+
 # ========= LOADERS =========
 @st.cache_data
-def load_daily_ports(path: str, sheet: str) -> pd.DataFrame:
-    path = _dropbox_to_direct(path)
-    df = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", dtype={"Tonnage": object})
+def load_daily_ports(path_or_url: str, sheet: str) -> pd.DataFrame:
+    bio = _open_excel_dropbox(path_or_url)
+    if bio is not None:
+        df = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl", dtype={"Tonnage": object})
+    else:
+        df = pd.read_excel(path_or_url, sheet_name=sheet, engine="openpyxl", dtype={"Tonnage": object})
+
     df = df.rename(columns={"Année Cacao": "AnneeCacao",
                             "Numéro Semaine": "NumeroSemaine",
                             "Numéro Jour": "NumeroJour"})
@@ -220,10 +207,15 @@ def load_daily_ports(path: str, sheet: str) -> pd.DataFrame:
     return df
 
 @st.cache_data
-def load_weekly_cumul(path: str, sheet: str) -> pd.DataFrame:
-    path = _dropbox_to_direct(path)
-    dfw = pd.read_excel(path, sheet_name=sheet, engine="openpyxl",
-                        dtype={"Weekly_Stat": object, "Cumul_Stat": object})
+def load_weekly_cumul(path_or_url: str, sheet: str) -> pd.DataFrame:
+    bio = _open_excel_dropbox(path_or_url)
+    if bio is not None:
+        dfw = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl",
+                            dtype={"Weekly_Stat": object, "Cumul_Stat": object})
+    else:
+        dfw = pd.read_excel(path_or_url, sheet_name=sheet, engine="openpyxl",
+                            dtype={"Weekly_Stat": object, "Cumul_Stat": object})
+
     dfw = dfw.rename(columns={
         "cocoayear": "AnneeCacao",
         "cocoayer 0000": "CocoaYear0000",
@@ -247,46 +239,54 @@ def load_weekly_cumul(path: str, sheet: str) -> pd.DataFrame:
     return dfw
 
 @st.cache_data
-def load_bota(path: str, sheet: str) -> pd.DataFrame:
-    path = _dropbox_to_direct(path)
-    raw = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", header=0)
-    cols = list(raw.columns)
-    block_starts = []
-    for i, c in enumerate(cols):
-        if str(c).strip().lower().startswith("date"):
-            win = [str(x) for x in cols[i:i+8]]
-            if any("Week_number" in w for w in win):
-                block_starts.append(i)
+def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
+    """
+    Lit le bloc 25/26 dans CIV_Bota_Arrivals_Treatments :
+    EO=Date, EP=cocoayear, EQ=Week_number, ES=Weekly Stat, ET=Cumul Stat.
+    Convertit en TONNES (×1000).
+    """
+    bio = _open_excel_dropbox(path_or_url)
+    if bio is not None:
+        raw = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl", header=0)
+    else:
+        raw = pd.read_excel(path_or_url, sheet_name=sheet, engine="openpyxl", header=0)
 
-    frames = []
-    for i in block_starts:
-        block = cols[i:i+8]
-        sub = raw[block].copy()
-        sub = sub.rename(columns={c: str(c).split(".")[0] for c in sub.columns})
-        for nm in ["Date","cocoayear","Week_number","Weekly_Bota","Cumul_Bota"]:
-            if nm not in sub.columns: sub[nm] = None
+    if raw is None or raw.empty:
+        return pd.DataFrame()
 
-        sub["Date"] = sub["Date"].apply(_parse_date)
-        sub = sub.dropna(subset=["Date","cocoayear"])
-        sub["AnneeCacao"]    = sub["cocoayear"].astype(str)
-        sub["NumeroSemaine"] = pd.to_numeric(sub["Week_number"], errors="coerce").fillna(0).astype(int)
-        sub["Weekly_Bota"] = sub["Weekly_Bota"].apply(_to_float) * 1000.0
-        sub["Cumul_Bota"]  = sub["Cumul_Bota"].apply(_to_float)  * 1000.0
-        sub["CocoaYearStart"] = sub["AnneeCacao"].map(_start_year_from_label)
-        sub["BaseDate"] = (
-            pd.to_datetime(dict(year=sub["CocoaYearStart"], month=10, day=1))
-            + pd.to_timedelta((sub["NumeroSemaine"]-1)*7, unit="D")
-        )
-        frames.append(
-            sub[["Date","AnneeCacao","CocoaYearStart","NumeroSemaine",
-                 "Weekly_Bota","Cumul_Bota","BaseDate"]]
-        )
+    # Indices des colonnes
+    idx_date = _excel_col_to_idx("EO")
+    idx_year = _excel_col_to_idx("EP")
+    idx_wk   = _excel_col_to_idx("EQ")
+    idx_es   = _excel_col_to_idx("ES")  # weekly STAT (k-t)
+    idx_et   = _excel_col_to_idx("ET")  # cumul STAT (k-t)
 
-    if not frames:
-        return pd.DataFrame(columns=["Date","AnneeCacao","CocoaYearStart","NumeroSemaine","Weekly_Bota","Cumul_Bota","BaseDate"])
-    out = pd.concat(frames, ignore_index=True)
-    out = out.dropna(subset=["AnneeCacao"])
-    return out
+    # Récupération & filtrage 25/26
+    year_col = raw.iloc[:, idx_year].astype(str).str.strip()
+    mask_2526 = year_col.eq("25/26")
+    if not mask_2526.any():
+        return pd.DataFrame()
+
+    out = pd.DataFrame({
+        "DateSrc":  pd.to_datetime(raw.loc[mask_2526, raw.columns[idx_date]], errors="coerce"),
+        "AnneeCacao": ["25/26"] * mask_2526.sum(),
+        "NumeroSemaine": pd.to_numeric(raw.loc[mask_2526, raw.columns[idx_wk]], errors="coerce"),
+        "Weekly_STAT":  pd.to_numeric(raw.loc[mask_2526, raw.columns[idx_es]], errors="coerce") * 1000.0,
+        "Cumul_STAT":   pd.to_numeric(raw.loc[mask_2526, raw.columns[idx_et]], errors="coerce") * 1000.0,
+    }).dropna(subset=["NumeroSemaine"])
+
+    out["NumeroSemaine"] = out["NumeroSemaine"].astype(int)
+    out["CocoaYearStart"] = 2025
+
+    # BaseDate : prioriser la date source (EO). Sinon reconstruire depuis semaine.
+    base_from_week = pd.Timestamp(2025,10,1) + pd.to_timedelta((out["NumeroSemaine"]-1)*7, unit="D")
+    out["BaseDate"] = out["DateSrc"].fillna(pd.NaT)
+    out.loc[out["BaseDate"].isna(), "BaseDate"] = base_from_week.loc[out["BaseDate"].isna()]
+    out = out.dropna(subset=["BaseDate"]).reset_index(drop=True)
+
+    # Conserver uniquement lignes où il y a au moins une info STAT
+    keep = out["Weekly_STAT"].notna() | out["Cumul_STAT"].notna()
+    return out.loc[keep].reset_index(drop=True)
 
 # ========= CHARGEMENT =========
 try:
@@ -302,10 +302,10 @@ except Exception as e:
     dfw = pd.DataFrame()
 
 try:
-    dfb = load_bota(DATA_FILE, SHEET_BOTA)
+    df_stat = load_stat_2526(DATA_FILE, SHEET_STAT)
 except Exception as e:
-    st.warning(f"Prévisions BOTA non chargées: {e}")
-    dfb = pd.DataFrame()
+    st.warning(f"Prévisions STAT non chargées: {e}")
+    df_stat = pd.DataFrame()
 
 # ========= SIDEBAR =========
 with st.sidebar:
@@ -336,11 +336,6 @@ with st.sidebar:
     freq = st.radio("Vue campagne", ["Hebdomadaire (officiel)", "Mensuelle (calendaire)"], index=0)
     show_cum = st.checkbox("Afficher le cumul (sinon : hebdo/ mensuel)", value=True)
 
-    show_bota = st.checkbox("Afficher prévisions BOTA", value=(not dfb.empty))
-    bota_year_options = sorted(dfb["AnneeCacao"].dropna().unique()) if not dfb.empty else []
-    bota_years_sel = st.multiselect("Années BOTA à afficher", bota_year_options,
-                                    default=[annee_sel] if annee_sel in bota_year_options else [])
-
 # Sous-ensemble journalier (ports)
 fdf = df[df["AnneeCacao"] == annee_sel].copy()
 if ports_sel:
@@ -357,7 +352,7 @@ k1, k2 = st.columns(2)
 k1.metric("Cumul hebdo (somme Weekly_Stat)", f"{official_total:,.1f} t")
 k2.metric("Ports actifs (journalier)", f"{ports_actifs}")
 if not curw.empty:
-    st.caption(f"Période hebdo couverte : {curw['Date'].min().date()} → {curw['Date'].max().date()}  •  Source : {SHEET_WEEKLY} (col. G)")
+    st.caption(f"Période hebdo couverte : {curw['Date'].min().date()} → {curw['Date'].max().date()}  •  Source : {SHEET_WEEKLY}")
 
 if freq.startswith("Hebdo"):
     if dfw.empty:
@@ -397,21 +392,6 @@ if freq.startswith("Hebdo"):
                 line_color=palette_main[i % len(palette_main)]
             ))
 
-        if show_bota and not dfb.empty and bota_years_sel:
-            for lab in [y for y in years_sel if y in set(bota_years_sel)]:
-                sb = dfb[dfb["AnneeCacao"]==lab].sort_values("NumeroSemaine").copy()
-                if sb.empty: continue
-                x_ = base_start + pd.to_timedelta((sb["NumeroSemaine"]-1)*7, unit="D")
-                y_ = sb["Cumul_Bota"] if show_cum else sb["Weekly_Bota"]
-                if y_.notna().any():
-                    y_max_hint = max(y_max_hint, float(y_.max()))
-                    fig1.add_trace(go.Scatter(
-                        x=x_, y=y_, mode="lines+markers",
-                        name=f"{lab} (Prévision)",
-                        line=dict(width=2, dash="dot", color="#6a51a3"),
-                        marker=dict(size=6)
-                    ))
-
         ttl  = "Cumul hebdomadaire" if show_cum else "Tonnage hebdomadaire"
         ylab = "Cumul (tons)" if show_cum else "Tonnage (tons)"
         style_excel_like(fig1,
@@ -438,7 +418,7 @@ else:
     st.plotly_chart(fig1m, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 2) COMPARAISON PAR SOUS-CAMPAGNE — HISTOGRAMMES + slider semaines
+# 2) COMPARAISON PAR SOUS-CAMPAGNE — HISTOGRAMMES + slider + STAT 25/26
 # ---------------------------------------------------------------------
 st.header("Comparaison par sous-campagne – Histogrammes (hebdo officiel)")
 
@@ -474,44 +454,33 @@ else:
 
     truncate_to_latest = st.checkbox("Tronquer la campagne courante à la dernière semaine disponible", value=True)
 
-    # Fenêtre de la sous-campagne
-    def _season_window(label: str, main: bool):
+    def _season_window(label: str, main: bool) -> Tuple[pd.Timestamp, pd.Timestamp]:
         y0 = _start_year_from_label(label)
         return (pd.Timestamp(y0,10,1), pd.Timestamp(y0+1,3,31,23,59,59)) if main \
                else (pd.Timestamp(y0+1,4,1), pd.Timestamp(y0+1,9,30,23,59,59))
 
     s0_cur, e0_cur = _season_window(annee_sel, is_main)
     cur_season = dfw[(dfw["AnneeCacao"]==annee_sel) & (dfw["Date"]>=s0_cur) & (dfw["Date"]<=e0_cur)].copy()
-    max_week = int(cur_season["NumeroSemaine"].max()) if not cur_season.empty else 1
 
-    # si on tronque à la dernière semaine dispo valide
-    if truncate_to_latest and not cur_season.empty:
+    if not cur_season.empty and truncate_to_latest:
         mask_valid = (cur_season["Weekly_Stat"].fillna(0) > 0) | (cur_season["Cumul_Stat"].fillna(0) > 0)
-        if mask_valid.any():
-            max_week = int(cur_season.loc[mask_valid, "NumeroSemaine"].max())
+        cur_season = cur_season.loc[mask_valid]
 
-    # --------- CORRECTION: slider robuste (pas d'erreur si max_week <= 1) ----------
-    try:
-        max_week = int(max_week)
-    except Exception:
-        max_week = 1
-    if max_week < 1:
-        max_week = 1
+    weeks_avail: List[int] = sorted(cur_season["NumeroSemaine"].dropna().astype(int).unique().tolist()) if not cur_season.empty else []
+    wk_min_allowed = int(min(weeks_avail)) if weeks_avail else 1
+    wk_max_allowed = int(max(weeks_avail)) if weeks_avail else 1
 
-    if max_week <= 1:
-        wk_start, wk_end = 1, 1
-        st.caption("Plage de semaines : 1 → 1 (une seule semaine disponible pour la campagne courante).")
-    else:
+    if wk_max_allowed > wk_min_allowed:
         wk_start, wk_end = st.slider(
             "Plage de semaines",
-            min_value=1,
-            max_value=max_week,
-            value=(1, max_week),
-            help="Sélectionne la fenêtre de semaines à cumuler dans l'histogramme."
+            min_value=wk_min_allowed,
+            max_value=wk_max_allowed,
+            value=(wk_min_allowed, wk_max_allowed)
         )
-    # ------------------------------------------------------------------------------
+    else:
+        st.info(f"Aucune plage multiple disponible : seule la semaine {wk_min_allowed} est présente.")
+        wk_start, wk_end = wk_min_allowed, wk_min_allowed
 
-    # fonction de cumul sur plage pour une année
     def window_sum(label: str, main: bool, wk_lo: int, wk_hi: int) -> float:
         s0, e0 = _season_window(label, main)
         d = dfw[(dfw["AnneeCacao"]==label) & (dfw["Date"]>=s0) & (dfw["Date"]<=e0)]
@@ -520,13 +489,19 @@ else:
         return float(d["Weekly_Stat"].sum())
 
     rows = []
-    # campagne courante
     rows.append({"Campagne": annee_sel, "Type": "Courante", "Tonnage": window_sum(annee_sel, is_main, wk_start, wk_end)})
-    # comparaisons
     for lab in compare_years:
         rows.append({"Campagne": lab, "Type": "Historique", "Tonnage": window_sum(lab, is_main, wk_start, wk_end)})
 
-    # LTA
+    # --- Prévision STAT (25/26) sur la même plage et même sous-période ---
+    if annee_sel == "25/26" and not df_stat.empty:
+        s0_win, e0_win = s0_cur.normalize(), e0_cur.normalize()
+        stat_win = df_stat[(df_stat["BaseDate"]>=s0_win) & (df_stat["BaseDate"]<=e0_win)].copy()
+        if not stat_win.empty:
+            stat_plage = stat_win[(stat_win["NumeroSemaine"]>=wk_start) & (stat_win["NumeroSemaine"]<=wk_end)]
+            val_stat = float(pd.to_numeric(stat_plage["Weekly_STAT"], errors="coerce").fillna(0).sum())
+            rows.append({"Campagne": "STAT 25/26", "Type": "Prévision (STAT)", "Tonnage": val_stat})
+
     if lta_years_season:
         vals = [window_sum(lab, is_main, wk_start, wk_end) for lab in lta_years_season]
         if vals:
@@ -534,24 +509,20 @@ else:
                          "Type": "LTA", "Tonnage": float(pd.Series(vals).mean())})
 
     df_hist = pd.DataFrame(rows)
-    palette = {"Courante": "#b71c1c","Historique": "#3569a6","LTA": "#2ca02c"}
-    fig_hist = px.bar(df_hist, x="Campagne", y="Tonnage", color="Type",
-                      color_discrete_map=palette)
-
-    title_hist = (f"Cumul {'MAIN' if is_main else 'MID'} CROP — Histogrammes<br>"
-                  f"<sup>Semaine {wk_start} → {wk_end} "
+    palette = {"Courante": "#b71c1c","Historique": "#3569a6","LTA": "#2ca02c","Prévision (STAT)":"#6a51a3"}
+    fig_hist = px.bar(df_hist, x="Campagne", y="Tonnage", color="Type", color_discrete_map=palette)
+    title_hist = (f"Cumul {'MAIN' if is_main else 'MID'} CROP — Histogrammes"
+                  f"<br><sup>Semaine {wk_start} → {wk_end} "
                   f"({s0_cur.strftime('%d/%m/%Y')} → {e0_cur.strftime('%d/%m/%Y')})</sup>")
     style_fig(fig_hist, title=title_hist,
               xaxis=dict(title="Campagne", showgrid=False),
               yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
-              bg="white", legend_right=True)
-
-    # Valeurs en gras au-dessus des barres
+              bg="white")
     fig_hist = add_value_labels(fig_hist, unit=" t")
     st.plotly_chart(fig_hist, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 3) CUMULS HEBDOMADAIRES — MULTI-ANNÉES + LTA (OFFICIEL) + BOTA
+# 3) CUMULS HEBDOMADAIRES — MULTI-ANNÉES + LTA (OFFICIEL) + STAT 25/26
 # ---------------------------------------------------------------------
 st.header("Cumuls hebdomadaires – Multi-années + LTA (officiel)")
 
@@ -601,54 +572,110 @@ else:
         })
 
     figc = go.Figure()
+    y_max_hint = 0.0
+
     if not cur.empty:
         figc.add_trace(go.Scatter(x=cur["BaseDate"], y=cur["Cumul_Stat"],
                                   mode="lines+markers", name=annee_sel,
                                   line=dict(color="#7f0000", width=3),
                                   marker=dict(symbol="circle", size=7)))
+        y_max_hint = max(y_max_hint, float(cur["Cumul_Stat"].max()))
+
     if not prev1.empty:
         lab1 = labels[idx-1]
         figc.add_trace(go.Scatter(x=prev1["BaseDate"], y=prev1["Cumul_Stat"],
                                   mode="lines+markers", name=lab1,
                                   line=dict(color="#1f77b4", width=2.5),
                                   marker=dict(symbol="triangle-up", size=7)))
+        y_max_hint = max(y_max_hint, float(prev1["Cumul_Stat"].max()))
+
     if not prev2.empty:
         lab2 = labels[idx-2]
         figc.add_trace(go.Scatter(x=prev2["BaseDate"], y=prev2["Cumul_Stat"],
                                   mode="lines+markers", name=lab2,
                                   line=dict(color="#ff7f0e", width=2.5),
                                   marker=dict(symbol="square", size=7)))
+        y_max_hint = max(y_max_hint, float(prev2["Cumul_Stat"].max()))
+
     if not lta_df.empty:
         lblavg = f"LTA ({lta_years[0]}–{lta_years[-1]})" if len(lta_years) >= 2 else f"LTA ({lta_years[0]})"
         figc.add_trace(go.Scatter(x=lta_df["BaseDate"], y=lta_df["Cumul_Stat"],
                                   mode="lines+markers", name=lblavg,
                                   line=dict(color="#2ca02c", width=2.5, dash="dash"),
                                   marker=dict(symbol="diamond", size=6)))
+        y_max_hint = max(y_max_hint, float(lta_df["Cumul_Stat"].max()))
 
-    # Y hint
-    y_max_hint = 0.0
-    for ddf in (cur, prev1, prev2, lta_df):
-        if not ddf.empty: y_max_hint = max(y_max_hint, float(ddf["Cumul_Stat"].max()))
-
-    if show_bota and not dfb.empty and bota_years_sel:
-        for lab in bota_years_sel:
-            sb = dfb[dfb["AnneeCacao"]==lab].sort_values("NumeroSemaine").copy()
-            if sb.empty or sb["Cumul_Bota"].isna().all(): continue
-            x_ = base_start + pd.to_timedelta((sb["NumeroSemaine"]-1)*7, unit="D")
-            y_ = sb["Cumul_Bota"]
-            y_max_hint = max(y_max_hint, float(y_.max()))
-            figc.add_trace(go.Scatter(
-                x=x_, y=y_, mode="lines+markers", name=f"{lab} (Prévision)",
-                line=dict(color="#6a51a3", width=2, dash="dot"), marker=dict(size=6)
-            ))
+    # --- Courbe Prévision STAT 25/26 (cumul, ET×1000) ---
+    if annee_sel == "25/26" and not df_stat.empty and df_stat["Cumul_STAT"].notna().any():
+        stat_cum = df_stat.sort_values("NumeroSemaine")
+        figc.add_trace(go.Scatter(
+            x=stat_cum["BaseDate"], y=stat_cum["Cumul_STAT"],
+            mode="lines+markers", name="STAT 25/26 (cumul)",
+            line=dict(color="#6a51a3", width=2, dash="dot"),
+            marker=dict(size=6)
+        ))
+        y_max_hint = max(y_max_hint, float(pd.to_numeric(stat_cum["Cumul_STAT"], errors="coerce").max() or 0))
 
     style_excel_like(figc, title="Côte d'Ivoire – Cumul hebdomadaire (tons)",
                      base_start=base_start, ylabel="Cumul (tons)", y_max_hint=y_max_hint)
     st.plotly_chart(figc, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 4) RÉPARTITIONS — camemberts (ports / jours de la semaine)
+# 4) COMPARAISON JOURNALIÈRE (avant export) + RÉPARTITIONS
 # ---------------------------------------------------------------------
+st.header("Comparaison journalière (YoY / années passées)")
+
+df_ports = df[df["Port"].isin(ports_sel)] if ports_sel else df
+date_defaut = fdf["Date"].max().date() if not fdf.empty else (df_ports["Date"].max().date() if not df_ports.empty else pd.Timestamp.today().date())
+c_date = st.date_input("Date (dans la campagne sélectionnée)", value=date_defaut, key="cmp_day")
+match_mode = st.radio("Correspondance", ["Calendrier (même date - N ans)", "Campagne (même jour de campagne)"], horizontal=True)
+
+camp_order = (df_ports[["CocoaYearStart","AnneeCacao"]].drop_duplicates().sort_values("CocoaYearStart"))
+labels_all_cmp = list(camp_order["AnneeCacao"])
+idx_cur_cmp = _safe_index(labels_all_cmp, annee_sel)
+labels_prev = labels_all_cmp[max(0, idx_cur_cmp-4):idx_cur_cmp]
+compare_sel = st.multiselect("Comparer à", labels_prev[::-1], default=labels_prev[-1:] if labels_prev else [], key="cmp_day_sel")
+
+d_cur = pd.Timestamp(c_date)
+if (df_ports["AnneeCacao"]==annee_sel).any():
+    start_cur = int(df_ports.loc[df_ports["AnneeCacao"]==annee_sel, "CocoaYearStart"].iloc[0])
+else:
+    start_cur = _start_year_from_label(annee_sel)
+jour_cacao_sel = int((d_cur.normalize() - pd.Timestamp(start_cur,10,1)).days) + 1
+sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.date==c_date)]["Tonnage"].sum()
+
+rows_prev = []
+for lab in compare_sel:
+    start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
+    comp_date = (d_cur - pd.DateOffset(years=int(annee_sel.split("/")[0]) - int(lab.split("/")[0]))) if match_mode.startswith("Calendrier") \
+                else (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1))
+    s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
+    rows_prev.append({"Campagne": lab, "Date": comp_date.date(), "Tonnage": s})
+
+row_cur = {"Campagne": annee_sel, "Date": c_date, "Tonnage": float(sum_cur)}
+res_prev = pd.DataFrame(rows_prev)
+df_all = pd.concat([pd.DataFrame([row_cur]), res_prev], ignore_index=True)
+
+cda, cdb = st.columns([1,1])
+with cda: st.metric("Tonnage du jour (campagne courante)", f"{sum_cur:,.1f} t")
+with cdb:
+    if not df_all.empty: st.dataframe(df_all.sort_values("Campagne"), use_container_width=True)
+
+if not df_all.empty:
+    palette_long = build_palette_long()
+    fig_daily = px.bar(df_all, x="Campagne", y="Tonnage", color="Campagne",
+                       labels={"Tonnage":"t"}, color_discrete_sequence=palette_long)
+    style_fig(fig_daily, title=f"Comparaison journalière – {pd.Timestamp(c_date).strftime('%d/%m/%Y')}",
+              xaxis=dict(title="Campagne", showgrid=False),
+              yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.1f"),
+              bg="white")
+    fig_daily.update_traces(hovertemplate="%{x}: %{y:,.1f} t")
+    for tr in fig_daily.data:
+        if tr.name == annee_sel:
+            tr.update(marker=dict(line=dict(width=2.5, color="black")))
+    st.plotly_chart(fig_daily, use_container_width=True)
+
+# Répartitions
 st.header("Répartitions — camemberts")
 c1, c2 = st.columns(2)
 
@@ -684,66 +711,13 @@ with c2:
         st.plotly_chart(figd2, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 5) COMPARAISON JOURNALIÈRE + CSV
+# 5) EXPORT CSV — une seule option
 # ---------------------------------------------------------------------
-st.header("Comparaison journalière + export")
-
-df_ports = df[df["Port"].isin(ports_sel)] if ports_sel else df
-date_defaut = fdf["Date"].max().date() if not fdf.empty else (df_ports["Date"].max().date() if not df_ports.empty else pd.Timestamp.today().date())
-c_date = st.date_input("Date (dans la campagne sélectionnée)", value=date_defaut, key="cmp_day")
-
-match_mode = st.radio("Correspondance", ["Calendrier (même date - N ans)", "Campagne (même jour de campagne)"], horizontal=True)
-
-camp_order = (df_ports[["CocoaYearStart","AnneeCacao"]].drop_duplicates().sort_values("CocoaYearStart"))
-labels_all_cmp = list(camp_order["AnneeCacao"])
-idx_cur_cmp = _safe_index(labels_all_cmp, annee_sel)
-labels_prev = labels_all_cmp[max(0, idx_cur_cmp-4):idx_cur_cmp]  # 4 années précédentes max
-compare_sel = st.multiselect("Comparer à", labels_prev[::-1], default=labels_prev[-1:] if labels_prev else [], key="cmp_day_sel")
-
-d_cur = pd.Timestamp(c_date)
-if (df_ports["AnneeCacao"]==annee_sel).any():
-    start_cur = int(df_ports.loc[df_ports["AnneeCacao"]==annee_sel, "CocoaYearStart"].iloc[0])
-else:
-    start_cur = _start_year_from_label(annee_sel)
-jour_cacao_sel = int((d_cur.normalize() - pd.Timestamp(start_cur,10,1)).days) + 1
-sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.date==c_date)]["Tonnage"].sum()
-
-rows_prev = []
-for lab in compare_sel:
-    start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
-    comp_date = (d_cur - pd.DateOffset(years=int(annee_sel.split("/")[0]) - int(lab.split("/")[0]))) if match_mode.startswith("Calendrier") \
-                else (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1))
-    s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
-    rows_prev.append({"Campagne": lab, "Date": comp_date.date(), "Tonnage": float(s)})
-
-row_cur = {"Campagne": annee_sel, "Date": c_date, "Tonnage": float(sum_cur)}
-res_prev = pd.DataFrame(rows_prev)
-df_all = pd.concat([pd.DataFrame([row_cur]), res_prev], ignore_index=True)
-
-cda, cdb = st.columns([1,1])
-with cda: st.metric("Tonnage du jour (campagne courante)", f"{sum_cur:,.1f} t")
-with cdb:
-    if not df_all.empty: st.dataframe(df_all.sort_values("Campagne"), use_container_width=True)
-
-if not df_all.empty:
-    palette_long = build_palette_long()
-    fig_daily = px.bar(df_all, x="Campagne", y="Tonnage", color="Campagne",
-                       labels={"Tonnage":"t"}, color_discrete_sequence=palette_long)
-    style_fig(fig_daily, title=f"Comparaison journalière – {pd.Timestamp(c_date).strftime('%d/%m/%Y')}",
-              xaxis=dict(title="Campagne", showgrid=False),
-              yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.1f"),
-              bg="white", legend_right=True)
-    fig_daily.update_traces(hovertemplate="%{x}: %{y:,.1f} t")
-    for tr in fig_daily.data:
-        if tr.name == annee_sel:
-            tr.update(marker=dict(line=dict(width=2.5, color="black")))
-    st.plotly_chart(fig_daily, use_container_width=True)
-
-# Export CSV du journalier filtré (section 5)
-with st.expander("⬇️ Exporter le journalier filtré (CSV)"):
+st.header("Export")
+with st.expander("Voir le détail / Exporter (journalier filtré)"):
     cols = ["Date","AnneeCacao","JourCacao","NumeroSemaine","NumeroJour","Port","Tonnage"]
     cols = [c for c in cols if c in fdf.columns]
-    dat = fdf.sort_values("Date", ascending=False)[cols].copy()
-    st.dataframe(dat, use_container_width=True)
-    csv = dat.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("Télécharger CSV", csv, file_name=f"CIV_daily_{annee_sel}.csv", mime="text/csv")
+    st.dataframe(fdf.sort_values("Date", ascending=False)[cols], use_container_width=True)
+    csv = fdf[cols].to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⬇️ Export CSV (arrivées filtrées)", csv,
+                       file_name=f"CIV_daily_{annee_sel}.csv", mime="text/csv")
