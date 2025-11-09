@@ -658,23 +658,46 @@ idx_cur_cmp = _safe_index(labels_all_cmp, annee_sel)
 labels_prev = labels_all_cmp[max(0, idx_cur_cmp-4):idx_cur_cmp]
 compare_sel = st.multiselect("Comparer à", labels_prev[::-1], default=labels_prev[-1:] if labels_prev else [], key="cmp_day_sel")
 
-d_cur = pd.Timestamp(c_date)
+# ---------- Helpers & calculs robustes pour les dates ----------
+def _start_year_from_label_fast(lbl: str) -> int:
+    try:
+        return 2000 + int(str(lbl).split("/")[0])
+    except Exception:
+        return _start_year_from_label(lbl)
+
+def _shift_calendar_years(ts: pd.Timestamp, src_lbl: str, dst_lbl: str) -> pd.Timestamp:
+    """Décale ts de (src_start - dst_start) années calendaires; gère 29/02."""
+    y_src = int(str(src_lbl).split("/")[0])
+    y_dst = int(str(dst_lbl).split("/")[0])
+    delta = y_src - y_dst
+    return (pd.Timestamp(ts).normalize() - pd.DateOffset(years=delta)).normalize()
+
+d_cur = pd.Timestamp(c_date).normalize()
 if (df_ports["AnneeCacao"]==annee_sel).any():
     start_cur = int(df_ports.loc[df_ports["AnneeCacao"]==annee_sel, "CocoaYearStart"].iloc[0])
 else:
     start_cur = _start_year_from_label(annee_sel)
-jour_cacao_sel = int((d_cur.normalize() - pd.Timestamp(start_cur,10,1)).days) + 1
-sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.date==c_date)]["Tonnage"].sum()
+jour_cacao_sel = int((d_cur - pd.Timestamp(start_cur,10,1)).days) + 1
+
+sum_cur = df_ports[
+    (df_ports["AnneeCacao"]==annee_sel) &
+    (df_ports["Date"].dt.normalize()==d_cur)
+]["Tonnage"].sum()
 
 rows_prev = []
 for lab in compare_sel:
-    start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
-    comp_date = (d_cur - pd.DateOffset(years=int(annee_sel.split("/")[0]) - int(lab.split("/")[0]))) if match_mode.startswith("Calendrier") \
-                else (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1))
-    s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
+    start_prev = _start_year_from_label_fast(lab)
+
+    if match_mode.startswith("Calendrier"):
+        comp_date = _shift_calendar_years(d_cur, annee_sel, lab)
+    else:
+        comp_date = (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1)).normalize()
+
+    mask = (df_ports["AnneeCacao"]==lab) & (df_ports["Date"].dt.normalize()==comp_date)
+    s = float(df_ports.loc[mask, "Tonnage"].sum())
     rows_prev.append({"Campagne": lab, "Date": comp_date.date(), "Tonnage": s})
 
-row_cur = {"Campagne": annee_sel, "Date": c_date, "Tonnage": float(sum_cur)}
+row_cur = {"Campagne": annee_sel, "Date": d_cur.date(), "Tonnage": float(sum_cur)}
 res_prev = pd.DataFrame(rows_prev)
 df_all = pd.concat([pd.DataFrame([row_cur]), res_prev], ignore_index=True)
 
@@ -687,7 +710,7 @@ if not df_all.empty:
     palette_long = build_palette_long()
     fig_daily = px.bar(df_all, x="Campagne", y="Tonnage", color="Campagne",
                        labels={"Tonnage":"t"}, color_discrete_sequence=palette_long)
-    style_fig(fig_daily, title=f"Comparaison journalière – {pd.Timestamp(c_date).strftime('%d/%m/%Y')}",
+    style_fig(fig_daily, title=f"Comparaison journalière – {d_cur.strftime('%d/%m/%Y')}",
               xaxis=dict(title="Campagne", showgrid=False),
               yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.1f"),
               bg="white")
