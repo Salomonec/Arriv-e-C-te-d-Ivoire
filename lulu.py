@@ -1,4 +1,4 @@
-# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions STAT (25/26)
+# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions STAT (25/26) 
 # -----------------------------------------------------------------------------
 # 1) Cumul campagne (hebdo/mensuel) + superposition multi-années
 # 2) Comparaison Main/Mid (hebdo officiel) — HISTOGRAMMES + slider + LTA + STAT (25/26)
@@ -157,6 +157,7 @@ def _open_excel_dropbox(path_like: str) -> Optional[io.BytesIO]:
         return None
     url = path_like
     if "dropbox.com" in url:
+        # force file download
         if "?dl=0" in url: url = url.replace("?dl=0", "?dl=1")
         elif "?dl=1" not in url and "?raw=1" not in url:
             glue = "&" if "?" in url else "?"
@@ -178,7 +179,8 @@ def _excel_col_to_idx(col_letters: str) -> int:
     return n - 1
 
 # ========= FICHIERS =========
-DATA_FILE = r"https://www.dropbox.com/scl/fi/wyzhzkzx5ddxug3qgdvwt/Fiches_Pays.xlsm?rlkey=vqauw3m1v3c1tc8r0blx7rng3&dl=0"
+# (IMPORTANT) Lien Dropbox forcé en ?dl=1
+DATA_FILE = r"https://www.dropbox.com/scl/fi/7g82ln9wuk81w212cxs68/Fiches_Pays.xlsm?rlkey=s95w5sr9q0pitth2bdittmwdl&st=aqex8smw&dl=0"
 SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
 SHEET_WEEKLY = "CIV_Arrivals_BDD"
 SHEET_STAT   = "CIV_Bota_Arrivals_Treatments"
@@ -254,14 +256,12 @@ def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
 
-    # Indices des colonnes
     idx_date = _excel_col_to_idx("EO")
     idx_year = _excel_col_to_idx("EP")
     idx_wk   = _excel_col_to_idx("EQ")
     idx_es   = _excel_col_to_idx("ES")  # weekly STAT (k-t)
     idx_et   = _excel_col_to_idx("ET")  # cumul STAT (k-t)
 
-    # Récupération & filtrage 25/26
     year_col = raw.iloc[:, idx_year].astype(str).str.strip()
     mask_2526 = year_col.eq("25/26")
     if not mask_2526.any():
@@ -277,35 +277,57 @@ def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
 
     out["NumeroSemaine"] = out["NumeroSemaine"].astype(int)
     out["CocoaYearStart"] = 2025
-
-    # BaseDate : prioriser la date source (EO). Sinon reconstruire depuis semaine.
     base_from_week = pd.Timestamp(2025,10,1) + pd.to_timedelta((out["NumeroSemaine"]-1)*7, unit="D")
     out["BaseDate"] = out["DateSrc"].fillna(pd.NaT)
     out.loc[out["BaseDate"].isna(), "BaseDate"] = base_from_week.loc[out["BaseDate"].isna()]
     out = out.dropna(subset=["BaseDate"]).reset_index(drop=True)
 
-    # Conserver uniquement lignes où il y a au moins une info STAT
     keep = out["Weekly_STAT"].notna() | out["Cumul_STAT"].notna()
     return out.loc[keep].reset_index(drop=True)
 
-# ========= CHARGEMENT =========
+# ========= CHARGEMENT ROBUSTE =========
+df: pd.DataFrame | None = None
+dfw: pd.DataFrame = pd.DataFrame()
+df_stat: pd.DataFrame = pd.DataFrame()
+
+# Journalier (OBLIGATOIRE)
 try:
     df = load_daily_ports(DATA_FILE, SHEET_DAILY)
 except Exception as e:
     st.error(f"Erreur chargement journalier: {e}")
+    df = None
+
+# Garde-fou: df doit exister et contenir des données
+if not isinstance(df, pd.DataFrame) or df is None or df.empty:
+    st.error(
+        "Les données journalières n'ont pas été chargées (df manquant ou vide). "
+        "Vérifie le lien Dropbox et l’onglet 'CIV_Arrivals_Ports_BDD'."
+    )
     st.stop()
 
+# Hebdo/cumul (facultatif)
 try:
     dfw = load_weekly_cumul(DATA_FILE, SHEET_WEEKLY)
 except Exception as e:
-    st.error(f"Erreur chargement hebdo/cumul: {e}")
+    st.warning(f"Hebdo/cumul non chargé: {e}")
     dfw = pd.DataFrame()
 
+# Prévisions STAT 25/26 (facultatif)
 try:
     df_stat = load_stat_2526(DATA_FILE, SHEET_STAT)
 except Exception as e:
     st.warning(f"Prévisions STAT non chargées: {e}")
     df_stat = pd.DataFrame()
+
+# Vérification colonnes minimales requises pour la partie journalière
+req_cols_day = {"AnneeCacao", "Date", "Tonnage"}
+missing_day = req_cols_day - set(df.columns)
+if missing_day:
+    st.error(
+        "Colonnes manquantes dans le journalier: "
+        f"{sorted(missing_day)}. Colonnes disponibles: {list(df.columns)}"
+    )
+    st.stop()
 
 # ========= SIDEBAR =========
 with st.sidebar:
