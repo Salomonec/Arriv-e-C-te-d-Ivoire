@@ -1,4 +1,4 @@
-# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions STAT (25/26) 
+# lulu.py — Dashboard Côte d'Ivoire (Cacao) + Prévisions STAT (25/26)
 # -----------------------------------------------------------------------------
 # 1) Cumul campagne (hebdo/mensuel) + superposition multi-années
 # 2) Comparaison Main/Mid (hebdo officiel) — HISTOGRAMMES + slider + LTA + STAT (25/26)
@@ -19,6 +19,10 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title="CIV – Port Arrivals (Cacao)", layout="wide")
+
+# ========= PARAMS CACHE =========
+# Change cette valeur quand tu veux forcer l'invalidation de TOUT le cache
+CACHE_VERSION = "2025-11-07-01"
 
 # ========= PALETTE =========
 def build_palette_long():
@@ -179,15 +183,14 @@ def _excel_col_to_idx(col_letters: str) -> int:
     return n - 1
 
 # ========= FICHIERS =========
-# (IMPORTANT) Lien Dropbox forcé en ?dl=1
 DATA_FILE = r"https://www.dropbox.com/scl/fi/7g82ln9wuk81w212cxs68/Fiches_Pays.xlsm?rlkey=s95w5sr9q0pitth2bdittmwdl&st=aqex8smw&dl=0"
 SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
 SHEET_WEEKLY = "CIV_Arrivals_BDD"
 SHEET_STAT   = "CIV_Bota_Arrivals_Treatments"
 
-# ========= LOADERS =========
-@st.cache_data
-def load_daily_ports(path_or_url: str, sheet: str) -> pd.DataFrame:
+# ========= LOADERS (avec TTL + version) =========
+@st.cache_data(ttl=600)
+def load_daily_ports(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
     bio = _open_excel_dropbox(path_or_url)
     if bio is not None:
         df = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl", dtype={"Tonnage": object})
@@ -208,8 +211,8 @@ def load_daily_ports(path_or_url: str, sheet: str) -> pd.DataFrame:
     df["JourSemaine"] = df["Date"].dt.dayofweek + 1
     return df
 
-@st.cache_data
-def load_weekly_cumul(path_or_url: str, sheet: str) -> pd.DataFrame:
+@st.cache_data(ttl=600)
+def load_weekly_cumul(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
     bio = _open_excel_dropbox(path_or_url)
     if bio is not None:
         dfw = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl",
@@ -240,8 +243,8 @@ def load_weekly_cumul(path_or_url: str, sheet: str) -> pd.DataFrame:
     dfw["BaseDate"] = base + pd.to_timedelta((dfw["NumeroSemaine"] - 1) * 7, unit="D")
     return dfw
 
-@st.cache_data
-def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
+@st.cache_data(ttl=600)
+def load_stat_2526(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
     """
     Lit le bloc 25/26 dans CIV_Bota_Arrivals_Treatments :
     EO=Date, EP=cocoayear, EQ=Week_number, ES=Weekly Stat, ET=Cumul Stat.
@@ -259,8 +262,8 @@ def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
     idx_date = _excel_col_to_idx("EO")
     idx_year = _excel_col_to_idx("EP")
     idx_wk   = _excel_col_to_idx("EQ")
-    idx_es   = _excel_col_to_idx("ES")  # weekly STAT (k-t)
-    idx_et   = _excel_col_to_idx("ET")  # cumul STAT (k-t)
+    idx_es   = _excel_col_to_idx("ES")
+    idx_et   = _excel_col_to_idx("ET")
 
     year_col = raw.iloc[:, idx_year].astype(str).str.strip()
     mask_2526 = year_col.eq("25/26")
@@ -331,6 +334,19 @@ if missing_day:
 
 # ========= SIDEBAR =========
 with st.sidebar:
+    st.header("Maintenance")
+    if st.button("♻️ Forcer l’actualisation (vider le cache)"):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+with st.sidebar:
     st.header("Filtres – Côte d’Ivoire")
 
     uni = pd.concat(
@@ -348,7 +364,7 @@ with st.sidebar:
     years_all = []
     if not dfw.empty and "AnneeCacao" in dfw.columns:
         years_all = (dfw["AnneeCacao"].dropna().drop_duplicates()
-                       .sort_values(key=lambda s: s.map(lambda x: int(str(x).split("/")[0]))).tolist())
+                       .sort_values(key=lambda s: s.map(lambda x: int(str(x).split('/')[0]))).tolist())
     default_years = [annee_sel] + ([years_all[years_all.index(annee_sel)-1]] if annee_sel in years_all and years_all.index(annee_sel)>0 else [])
     years_overlay = st.multiselect("Années à superposer (hebdo multi-années)", options=years_all, default=default_years)
 
@@ -658,46 +674,29 @@ idx_cur_cmp = _safe_index(labels_all_cmp, annee_sel)
 labels_prev = labels_all_cmp[max(0, idx_cur_cmp-4):idx_cur_cmp]
 compare_sel = st.multiselect("Comparer à", labels_prev[::-1], default=labels_prev[-1:] if labels_prev else [], key="cmp_day_sel")
 
-# ---------- Helpers & calculs robustes pour les dates ----------
-def _start_year_from_label_fast(lbl: str) -> int:
-    try:
-        return 2000 + int(str(lbl).split("/")[0])
-    except Exception:
-        return _start_year_from_label(lbl)
-
-def _shift_calendar_years(ts: pd.Timestamp, src_lbl: str, dst_lbl: str) -> pd.Timestamp:
-    """Décale ts de (src_start - dst_start) années calendaires; gère 29/02."""
-    y_src = int(str(src_lbl).split("/")[0])
-    y_dst = int(str(dst_lbl).split("/")[0])
-    delta = y_src - y_dst
-    return (pd.Timestamp(ts).normalize() - pd.DateOffset(years=delta)).normalize()
-
-d_cur = pd.Timestamp(c_date).normalize()
+d_cur = pd.Timestamp(c_date)
 if (df_ports["AnneeCacao"]==annee_sel).any():
     start_cur = int(df_ports.loc[df_ports["AnneeCacao"]==annee_sel, "CocoaYearStart"].iloc[0])
 else:
     start_cur = _start_year_from_label(annee_sel)
-jour_cacao_sel = int((d_cur - pd.Timestamp(start_cur,10,1)).days) + 1
-
-sum_cur = df_ports[
-    (df_ports["AnneeCacao"]==annee_sel) &
-    (df_ports["Date"].dt.normalize()==d_cur)
-]["Tonnage"].sum()
+jour_cacao_sel = int((d_cur.normalize() - pd.Timestamp(start_cur,10,1)).days) + 1
+sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.date==c_date)]["Tonnage"].sum()
 
 rows_prev = []
 for lab in compare_sel:
-    start_prev = _start_year_from_label_fast(lab)
-
+    start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
+    # Date équivalente:
+    # - mode Calendrier: même date – décalage d'années
+    # - mode Campagne : même jour relatif (Oct 1 + (jour_cacao_sel-1))
     if match_mode.startswith("Calendrier"):
-        comp_date = _shift_calendar_years(d_cur, annee_sel, lab)
+        delta_years = int(annee_sel.split("/")[0]) - int(lab.split("/")[0])
+        comp_date = d_cur - pd.DateOffset(years=delta_years)
     else:
-        comp_date = (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1)).normalize()
-
-    mask = (df_ports["AnneeCacao"]==lab) & (df_ports["Date"].dt.normalize()==comp_date)
-    s = float(df_ports.loc[mask, "Tonnage"].sum())
+        comp_date = pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1)
+    s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
     rows_prev.append({"Campagne": lab, "Date": comp_date.date(), "Tonnage": s})
 
-row_cur = {"Campagne": annee_sel, "Date": d_cur.date(), "Tonnage": float(sum_cur)}
+row_cur = {"Campagne": annee_sel, "Date": c_date, "Tonnage": float(sum_cur)}
 res_prev = pd.DataFrame(rows_prev)
 df_all = pd.concat([pd.DataFrame([row_cur]), res_prev], ignore_index=True)
 
@@ -710,7 +709,7 @@ if not df_all.empty:
     palette_long = build_palette_long()
     fig_daily = px.bar(df_all, x="Campagne", y="Tonnage", color="Campagne",
                        labels={"Tonnage":"t"}, color_discrete_sequence=palette_long)
-    style_fig(fig_daily, title=f"Comparaison journalière – {d_cur.strftime('%d/%m/%Y')}",
+    style_fig(fig_daily, title=f"Comparaison journalière – {pd.Timestamp(c_date).strftime('%d/%m/%Y')}",
               xaxis=dict(title="Campagne", showgrid=False),
               yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.1f"),
               bg="white")
