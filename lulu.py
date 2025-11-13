@@ -20,9 +20,25 @@ import streamlit as st
 
 st.set_page_config(page_title="CIV – Port Arrivals (Cacao)", layout="wide")
 
-# ========= PARAMS CACHE =========
-# Change cette valeur quand tu veux forcer l'invalidation de TOUT le cache
-CACHE_VERSION = "2025-11-07-01"
+# ========= Bouton ACTUALISER (clear cache + rerun, compatible versions) =========
+with st.sidebar:
+    st.markdown("### Données")
+    if st.button("🔄 Actualiser"):
+        # Vide les caches Streamlit si disponibles
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
+
+        # Relance l'app : st.rerun() (récent) ; sinon fallback experimental_rerun()
+        if hasattr(st, "rerun"):
+            st.rerun()
+        else:
+            st.experimental_rerun()
 
 # ========= PALETTE =========
 def build_palette_long():
@@ -161,7 +177,6 @@ def _open_excel_dropbox(path_like: str) -> Optional[io.BytesIO]:
         return None
     url = path_like
     if "dropbox.com" in url:
-        # force file download
         if "?dl=0" in url: url = url.replace("?dl=0", "?dl=1")
         elif "?dl=1" not in url and "?raw=1" not in url:
             glue = "&" if "?" in url else "?"
@@ -188,9 +203,9 @@ SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
 SHEET_WEEKLY = "CIV_Arrivals_BDD"
 SHEET_STAT   = "CIV_Bota_Arrivals_Treatments"
 
-# ========= LOADERS (avec TTL + version) =========
-@st.cache_data(ttl=600)
-def load_daily_ports(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
+# ========= LOADERS =========
+@st.cache_data
+def load_daily_ports(path_or_url: str, sheet: str) -> pd.DataFrame:
     bio = _open_excel_dropbox(path_or_url)
     if bio is not None:
         df = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl", dtype={"Tonnage": object})
@@ -211,8 +226,8 @@ def load_daily_ports(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> p
     df["JourSemaine"] = df["Date"].dt.dayofweek + 1
     return df
 
-@st.cache_data(ttl=600)
-def load_weekly_cumul(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
+@st.cache_data
+def load_weekly_cumul(path_or_url: str, sheet: str) -> pd.DataFrame:
     bio = _open_excel_dropbox(path_or_url)
     if bio is not None:
         dfw = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl",
@@ -243,8 +258,8 @@ def load_weekly_cumul(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> 
     dfw["BaseDate"] = base + pd.to_timedelta((dfw["NumeroSemaine"] - 1) * 7, unit="D")
     return dfw
 
-@st.cache_data(ttl=600)
-def load_stat_2526(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.DataFrame:
+@st.cache_data
+def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
     """
     Lit le bloc 25/26 dans CIV_Bota_Arrivals_Treatments :
     EO=Date, EP=cocoayear, EQ=Week_number, ES=Weekly Stat, ET=Cumul Stat.
@@ -262,8 +277,8 @@ def load_stat_2526(path_or_url: str, sheet: str, _v: str = CACHE_VERSION) -> pd.
     idx_date = _excel_col_to_idx("EO")
     idx_year = _excel_col_to_idx("EP")
     idx_wk   = _excel_col_to_idx("EQ")
-    idx_es   = _excel_col_to_idx("ES")
-    idx_et   = _excel_col_to_idx("ET")
+    idx_es   = _excel_col_to_idx("ES")  # weekly STAT (k-t)
+    idx_et   = _excel_col_to_idx("ET")  # cumul STAT (k-t)
 
     year_col = raw.iloc[:, idx_year].astype(str).str.strip()
     mask_2526 = year_col.eq("25/26")
@@ -333,19 +348,6 @@ if missing_day:
     st.stop()
 
 # ========= SIDEBAR =========
-with st.sidebar:
-    st.header("Maintenance")
-    if st.button("♻️ Forcer l’actualisation (vider le cache)"):
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-        try:
-            st.cache_resource.clear()
-        except Exception:
-            pass
-        st.rerun()
-
 with st.sidebar:
     st.header("Filtres – Côte d’Ivoire")
 
@@ -438,22 +440,31 @@ if freq.startswith("Hebdo"):
         st.plotly_chart(fig1, use_container_width=True)
 
 else:
-    fdf["Mois"] = fdf["Date"].dt.to_period("M").dt.to_timestamp()
-    ts = fdf.groupby("Mois", as_index=False)["Tonnage"].sum().sort_values("Mois")
-    if show_cum:
-        ts["Cumul"] = ts["Tonnage"].cumsum()
-        fig1m = px.line(ts, x="Mois", y="Cumul", markers=True)
-        style_fig(fig1m, title=f"Cumul mensuel – Campagne {annee_sel}",
-                  xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
-                  yaxis=dict(title="Tonnage cumulé (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
-                  bg="white")
+    # Vue mensuelle basée sur la base hebdo/cumul (CIV_Arrivals_BDD)
+    if dfw.empty:
+        st.warning("Impossible d'afficher la vue mensuelle (base hebdo vide).")
     else:
-        fig1m = px.line(ts, x="Mois", y="Tonnage", markers=True)
-        style_fig(fig1m, title=f"Tonnage mensuel – Campagne {annee_sel}",
-                  xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
-                  yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
-                  bg="white")
-    st.plotly_chart(fig1m, use_container_width=True)
+        dcur = dfw[dfw["AnneeCacao"]==annee_sel].copy()
+        if dcur.empty:
+            st.info("Pas de données hebdomadaires pour cette campagne.")
+        else:
+            # Convertit les semaines en dates de fin de semaine puis regroupe par mois calendaire
+            dcur["Mois"] = dcur["Date"].dt.to_period("M").dt.to_timestamp()
+            ts = dcur.groupby("Mois", as_index=False)["Weekly_Stat"].sum().sort_values("Mois")
+            if show_cum:
+                ts["Cumul"] = ts["Weekly_Stat"].cumsum()
+                fig1m = px.line(ts, x="Mois", y="Cumul", markers=True)
+                style_fig(fig1m, title=f"Cumul mensuel – Campagne {annee_sel}",
+                          xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
+                          yaxis=dict(title="Tonnage cumulé (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
+                          bg="white")
+            else:
+                fig1m = px.line(ts, x="Mois", y="Weekly_Stat", markers=True)
+                style_fig(fig1m, title=f"Tonnage mensuel – Campagne {annee_sel}",
+                          xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
+                          yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
+                          bg="white")
+            st.plotly_chart(fig1m, use_container_width=True)
 
 # ---------------------------------------------------------------------
 # 2) COMPARAISON PAR SOUS-CAMPAGNE — HISTOGRAMMES + slider + STAT 25/26
@@ -546,7 +557,11 @@ else:
             rows.append({"Campagne": f"LTA ({lta_years_season[0]}–{lta_years_season[-1]})" if len(lta_years_season)>=2 else f"LTA ({lta_years_season[0]})",
                          "Type": "LTA", "Tonnage": float(pd.Series(vals).mean())})
 
+    # Légendes enrichies avec les dates de la plage sélectionnée
+    legend_dates = f"[{(s0_cur + pd.to_timedelta((wk_start-1)*7, 'D')).strftime('%d/%m')}—{(s0_cur + pd.to_timedelta((wk_end-1)*7, 'D')).strftime('%d/%m')}]"
     df_hist = pd.DataFrame(rows)
+    df_hist["Campagne"] = df_hist["Campagne"].astype(str) + f" {legend_dates}"
+
     palette = {"Courante": "#b71c1c","Historique": "#3569a6","LTA": "#2ca02c","Prévision (STAT)":"#6a51a3"}
     fig_hist = px.bar(df_hist, x="Campagne", y="Tonnage", color="Type", color_discrete_map=palette)
     title_hist = (f"Cumul {'MAIN' if is_main else 'MID'} CROP — Histogrammes"
@@ -685,12 +700,9 @@ sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.da
 rows_prev = []
 for lab in compare_sel:
     start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
-    # Date équivalente:
-    # - mode Calendrier: même date – décalage d'années
-    # - mode Campagne : même jour relatif (Oct 1 + (jour_cacao_sel-1))
     if match_mode.startswith("Calendrier"):
-        delta_years = int(annee_sel.split("/")[0]) - int(lab.split("/")[0])
-        comp_date = d_cur - pd.DateOffset(years=delta_years)
+        years_delta = int(annee_sel.split("/")[0]) - int(lab.split("/")[0])
+        comp_date = d_cur - pd.DateOffset(years=years_delta)
     else:
         comp_date = pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1)
     s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
