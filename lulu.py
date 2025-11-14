@@ -9,7 +9,6 @@
 
 import io
 import re
-from pathlib import Path
 from typing import Optional, Tuple, List
 
 import pandas as pd
@@ -19,26 +18,6 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title="CIV – Port Arrivals (Cacao)", layout="wide")
-
-# ========= Bouton ACTUALISER (clear cache + rerun, compatible versions) =========
-with st.sidebar:
-    st.markdown("### Données")
-    if st.button("🔄 Actualiser"):
-        # Vide les caches Streamlit si disponibles
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-        try:
-            st.cache_resource.clear()
-        except Exception:
-            pass
-
-        # Relance l'app : st.rerun() (récent) ; sinon fallback experimental_rerun()
-        if hasattr(st, "rerun"):
-            st.rerun()
-        else:
-            st.experimental_rerun()
 
 # ========= PALETTE =========
 def build_palette_long():
@@ -198,7 +177,7 @@ def _excel_col_to_idx(col_letters: str) -> int:
     return n - 1
 
 # ========= FICHIERS =========
-DATA_FILE = r"https://www.dropbox.com/scl/fi/7g82ln9wuk81w212cxs68/Fiches_Pays.xlsm?rlkey=s95w5sr9q0pitth2bdittmwdl&st=aqex8smw&dl=0"
+DATA_FILE = r"https://www.dropbox.com/scl/fi/7g82ln9wuk81w212cxs68/Fiches_Pays.xlsm?rlkey=s95w5sr9q0pitth2bdittmwdl&dl=0"
 SHEET_DAILY  = "CIV_Arrivals_Ports_BDD"
 SHEET_WEEKLY = "CIV_Arrivals_BDD"
 SHEET_STAT   = "CIV_Bota_Arrivals_Treatments"
@@ -260,11 +239,6 @@ def load_weekly_cumul(path_or_url: str, sheet: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
-    """
-    Lit le bloc 25/26 dans CIV_Bota_Arrivals_Treatments :
-    EO=Date, EP=cocoayear, EQ=Week_number, ES=Weekly Stat, ET=Cumul Stat.
-    Convertit en TONNES (×1000).
-    """
     bio = _open_excel_dropbox(path_or_url)
     if bio is not None:
         raw = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl", header=0)
@@ -277,8 +251,8 @@ def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
     idx_date = _excel_col_to_idx("EO")
     idx_year = _excel_col_to_idx("EP")
     idx_wk   = _excel_col_to_idx("EQ")
-    idx_es   = _excel_col_to_idx("ES")  # weekly STAT (k-t)
-    idx_et   = _excel_col_to_idx("ET")  # cumul STAT (k-t)
+    idx_es   = _excel_col_to_idx("ES")
+    idx_et   = _excel_col_to_idx("ET")
 
     year_col = raw.iloc[:, idx_year].astype(str).str.strip()
     mask_2526 = year_col.eq("25/26")
@@ -303,7 +277,16 @@ def load_stat_2526(path_or_url: str, sheet: str) -> pd.DataFrame:
     keep = out["Weekly_STAT"].notna() | out["Cumul_STAT"].notna()
     return out.loc[keep].reset_index(drop=True)
 
-# ========= CHARGEMENT ROBUSTE =========
+# ========= CHARGEMENT ROBUSTE + BOUTON ACTUALISER =========
+with st.sidebar:
+    st.header("Données")
+    if st.button("🔄 Actualiser", use_container_width=True):
+        # Invalidate caches puis relancer
+        load_daily_ports.clear()
+        load_weekly_cumul.clear()
+        load_stat_2526.clear()
+        st.rerun()
+
 df: pd.DataFrame | None = None
 dfw: pd.DataFrame = pd.DataFrame()
 df_stat: pd.DataFrame = pd.DataFrame()
@@ -315,12 +298,8 @@ except Exception as e:
     st.error(f"Erreur chargement journalier: {e}")
     df = None
 
-# Garde-fou: df doit exister et contenir des données
 if not isinstance(df, pd.DataFrame) or df is None or df.empty:
-    st.error(
-        "Les données journalières n'ont pas été chargées (df manquant ou vide). "
-        "Vérifie le lien Dropbox et l’onglet 'CIV_Arrivals_Ports_BDD'."
-    )
+    st.error("Les données journalières n'ont pas été chargées. Vérifie le lien Dropbox / l’onglet 'CIV_Arrivals_Ports_BDD'.")
     st.stop()
 
 # Hebdo/cumul (facultatif)
@@ -337,14 +316,11 @@ except Exception as e:
     st.warning(f"Prévisions STAT non chargées: {e}")
     df_stat = pd.DataFrame()
 
-# Vérification colonnes minimales requises pour la partie journalière
+# Vérif colonnes minimales
 req_cols_day = {"AnneeCacao", "Date", "Tonnage"}
 missing_day = req_cols_day - set(df.columns)
 if missing_day:
-    st.error(
-        "Colonnes manquantes dans le journalier: "
-        f"{sorted(missing_day)}. Colonnes disponibles: {list(df.columns)}"
-    )
+    st.error(f"Colonnes manquantes dans le journalier: {sorted(missing_day)}.")
     st.stop()
 
 # ========= SIDEBAR =========
@@ -366,15 +342,15 @@ with st.sidebar:
     years_all = []
     if not dfw.empty and "AnneeCacao" in dfw.columns:
         years_all = (dfw["AnneeCacao"].dropna().drop_duplicates()
-                       .sort_values(key=lambda s: s.map(lambda x: int(str(x).split('/')[0]))).tolist())
+                       .sort_values(key=lambda s: s.map(lambda x: int(str(x).split("/")[0]))).tolist())
     default_years = [annee_sel] + ([years_all[years_all.index(annee_sel)-1]] if annee_sel in years_all and years_all.index(annee_sel)>0 else [])
     years_overlay = st.multiselect("Années à superposer (hebdo multi-années)", options=years_all, default=default_years)
 
     ports = sorted(df["Port"].dropna().unique())
     ports_sel = st.multiselect("Ports (journalier)", ports, default=ports)
 
-    freq = st.radio("Vue campagne", ["Hebdomadaire (officiel)", "Mensuelle (calendaire)"], index=0)
-    show_cum = st.checkbox("Afficher le cumul (sinon : hebdo/ mensuel)", value=True)
+    freq = st.radio("Vue campagne", ["Hebdomadaire (officiel)", "Mensuelle (calendaire cacao)"], index=0)
+    show_cum = st.checkbox("Afficher le cumul (sinon : mensuel)", value=True)
 
 # Sous-ensemble journalier (ports)
 fdf = df[df["AnneeCacao"] == annee_sel].copy()
@@ -440,30 +416,65 @@ if freq.startswith("Hebdo"):
         st.plotly_chart(fig1, use_container_width=True)
 
 else:
-    # Vue mensuelle basée sur la base hebdo/cumul (CIV_Arrivals_BDD)
+    # ------------------ VUE MENSUELLE (MOIS CACAO) CORRIGÉE ------------------
     if dfw.empty:
         st.warning("Impossible d'afficher la vue mensuelle (base hebdo vide).")
     else:
-        dcur = dfw[dfw["AnneeCacao"]==annee_sel].copy()
+        dcur = dfw[dfw["AnneeCacao"] == annee_sel].copy()
         if dcur.empty:
             st.info("Pas de données hebdomadaires pour cette campagne.")
         else:
-            # Convertit les semaines en dates de fin de semaine puis regroupe par mois calendaire
-            dcur["Mois"] = dcur["Date"].dt.to_period("M").dt.to_timestamp()
-            ts = dcur.groupby("Mois", as_index=False)["Weekly_Stat"].sum().sort_values("Mois")
+            dcur["NumeroMois"] = pd.to_numeric(
+                dcur.get("NumeroMois", dcur.get("Month_number")), errors="coerce"
+            )
+            dcur = dcur.dropna(subset=["NumeroMois"])
+            dcur["NumeroMois"] = dcur["NumeroMois"].astype(int)
+            dcur["Weekly_Stat"] = pd.to_numeric(dcur["Weekly_Stat"], errors="coerce").fillna(0.0)
+
+            # Agrégat mensuel et retrait des mois sans tonnage
+            ts = (
+                dcur.groupby("NumeroMois", as_index=False)["Weekly_Stat"]
+                    .sum()
+                    .rename(columns={"Weekly_Stat": "Tonnage"})
+            )
+            ts = ts[ts["Tonnage"] > 0]
+
+            # Ordre des mois cacao 10→12 puis 1→9
+            months_order = list(range(10, 13)) + list(range(1, 10))
+            order_map = {m: i for i, m in enumerate(months_order)}
+            ts["Order"] = ts["NumeroMois"].map(order_map)
+            ts = ts.sort_values("Order").reset_index(drop=True)
+
+            # Date = 1er jour du mois cacao
+            base_year = _start_year_from_label(annee_sel)
+
+            def cocoa_month_start(m: int) -> pd.Timestamp:
+                year = base_year if m >= 10 else base_year + 1
+                return pd.Timestamp(year, int(m), 1)
+
+            ts["Mois"] = ts["NumeroMois"].map(cocoa_month_start)
+            ts["Cumul"] = ts["Tonnage"].cumsum()
+
             if show_cum:
-                ts["Cumul"] = ts["Weekly_Stat"].cumsum()
                 fig1m = px.line(ts, x="Mois", y="Cumul", markers=True)
-                style_fig(fig1m, title=f"Cumul mensuel – Campagne {annee_sel}",
-                          xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
-                          yaxis=dict(title="Tonnage cumulé (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
-                          bg="white")
+                style_fig(
+                    fig1m,
+                    title=f"Cumul mensuel – Campagne {annee_sel} (mois cacao)",
+                    xaxis=dict(title="Mois (cacao)", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
+                    yaxis=dict(title="Tonnage cumulé (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
+                    bg="white",
+                )
             else:
-                fig1m = px.line(ts, x="Mois", y="Weekly_Stat", markers=True)
-                style_fig(fig1m, title=f"Tonnage mensuel – Campagne {annee_sel}",
-                          xaxis=dict(title="Mois", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
-                          yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
-                          bg="white")
+                fig1m = px.bar(ts, x="Mois", y="Tonnage")
+                style_fig(
+                    fig1m,
+                    title=f"Tonnage mensuel – Campagne {annee_sel} (mois cacao)",
+                    xaxis=dict(title="Mois (cacao)", showgrid=True, gridcolor="#dddddd", tickformat="%m/%Y"),
+                    yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
+                    bg="white",
+                )
+                fig1m.update_traces(hovertemplate="%{x|%m/%Y}: %{y:,.0f} t")
+
             st.plotly_chart(fig1m, use_container_width=True)
 
 # ---------------------------------------------------------------------
@@ -542,7 +553,7 @@ else:
     for lab in compare_years:
         rows.append({"Campagne": lab, "Type": "Historique", "Tonnage": window_sum(lab, is_main, wk_start, wk_end)})
 
-    # --- Prévision STAT (25/26) sur la même plage et même sous-période ---
+    # Prévision STAT (25/26) sur même plage / sous-période
     if annee_sel == "25/26" and not df_stat.empty:
         s0_win, e0_win = s0_cur.normalize(), e0_cur.normalize()
         stat_win = df_stat[(df_stat["BaseDate"]>=s0_win) & (df_stat["BaseDate"]<=e0_win)].copy()
@@ -557,16 +568,18 @@ else:
             rows.append({"Campagne": f"LTA ({lta_years_season[0]}–{lta_years_season[-1]})" if len(lta_years_season)>=2 else f"LTA ({lta_years_season[0]})",
                          "Type": "LTA", "Tonnage": float(pd.Series(vals).mean())})
 
-    # Légendes enrichies avec les dates de la plage sélectionnée
-    legend_dates = f"[{(s0_cur + pd.to_timedelta((wk_start-1)*7, 'D')).strftime('%d/%m')}—{(s0_cur + pd.to_timedelta((wk_end-1)*7, 'D')).strftime('%d/%m')}]"
-    df_hist = pd.DataFrame(rows)
-    df_hist["Campagne"] = df_hist["Campagne"].astype(str) + f" {legend_dates}"
+    # Légendes avec plage de dates exacte sélectionnée
+    base_year_cur = _start_year_from_label(annee_sel)
+    start_season = pd.Timestamp(base_year_cur, 10, 1) if is_main else pd.Timestamp(base_year_cur+1, 4, 1)
+    start_date_sel = start_season + pd.to_timedelta((wk_start-1)*7, unit="D")
+    end_date_sel   = start_season + pd.to_timedelta((wk_end-1)*7,   unit="D")
 
+    df_hist = pd.DataFrame(rows)
     palette = {"Courante": "#b71c1c","Historique": "#3569a6","LTA": "#2ca02c","Prévision (STAT)":"#6a51a3"}
     fig_hist = px.bar(df_hist, x="Campagne", y="Tonnage", color="Type", color_discrete_map=palette)
     title_hist = (f"Cumul {'MAIN' if is_main else 'MID'} CROP — Histogrammes"
-                  f"<br><sup>Semaine {wk_start} → {wk_end} "
-                  f"({s0_cur.strftime('%d/%m/%Y')} → {e0_cur.strftime('%d/%m/%Y')})</sup>")
+                  f"<br><sup>Semaine {wk_start} → {wk_end}  "
+                  f"[{start_date_sel.strftime('%d/%m/%Y')} → {end_date_sel.strftime('%d/%m/%Y')}]</sup>")
     style_fig(fig_hist, title=title_hist,
               xaxis=dict(title="Campagne", showgrid=False),
               yaxis=dict(title="Tonnage (t)", showgrid=True, gridcolor="#dddddd", tickformat=",.0f"),
@@ -575,7 +588,7 @@ else:
     st.plotly_chart(fig_hist, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 3) CUMULS HEBDOMADAIRES — MULTI-ANNÉES + LTA (OFFICIEL) + STAT 25/26
+# 3) CUMULS HEBDOMADAIRES – MULTI-ANNÉES + LTA + STAT 25/26
 # ---------------------------------------------------------------------
 st.header("Cumuls hebdomadaires – Multi-années + LTA (officiel)")
 
@@ -658,7 +671,6 @@ else:
                                   marker=dict(symbol="diamond", size=6)))
         y_max_hint = max(y_max_hint, float(lta_df["Cumul_Stat"].max()))
 
-    # --- Courbe Prévision STAT 25/26 (cumul, ET×1000) ---
     if annee_sel == "25/26" and not df_stat.empty and df_stat["Cumul_STAT"].notna().any():
         stat_cum = df_stat.sort_values("NumeroSemaine")
         figc.add_trace(go.Scatter(
@@ -674,7 +686,7 @@ else:
     st.plotly_chart(figc, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# 4) COMPARAISON JOURNALIÈRE (avant export) + RÉPARTITIONS
+# 4) COMPARAISON JOURNALIÈRE + RÉPARTITIONS
 # ---------------------------------------------------------------------
 st.header("Comparaison journalière (YoY / années passées)")
 
@@ -700,11 +712,8 @@ sum_cur = df_ports[(df_ports["AnneeCacao"]==annee_sel) & (df_ports["Date"].dt.da
 rows_prev = []
 for lab in compare_sel:
     start_prev = int(camp_order.loc[camp_order["AnneeCacao"]==lab, "CocoaYearStart"].iloc[0])
-    if match_mode.startswith("Calendrier"):
-        years_delta = int(annee_sel.split("/")[0]) - int(lab.split("/")[0])
-        comp_date = d_cur - pd.DateOffset(years=years_delta)
-    else:
-        comp_date = pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1)
+    comp_date = (d_cur - pd.DateOffset(years=int(annee_sel.split("/")[0]) - int(lab.split("/")[0]))) if match_mode.startswith("Calendrier") \
+                else (pd.Timestamp(start_prev,10,1) + pd.Timedelta(days=jour_cacao_sel-1))
     s = df_ports[(df_ports["AnneeCacao"]==lab) & (df_ports["Date"]==comp_date)]["Tonnage"].sum()
     rows_prev.append({"Campagne": lab, "Date": comp_date.date(), "Tonnage": s})
 
